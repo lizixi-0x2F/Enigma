@@ -23,6 +23,7 @@ def main():
         "--warmup-ratio", "0.1",  # 预热步数比例
         "--weight-decay", "1e-3",  # 权重衰减
         "--use-amp",  # 使用混合精度训练
+        "--amp-dtype", "float16",  # 明确指定使用fp16精度
         "--use-alibi",  # 使用ALiBi位置编码
         "--max-len", "8192",  # 最大序列长度
         "--tokenizer", "bert-chinese-base",  # 使用bert tokenizer
@@ -30,6 +31,13 @@ def main():
         "--saved-tokenizer-path", "checkpoints_optimized/tokenizer.pkl",  # 分词器路径
         "--save-every", "5000",  # 每5000步保存一次
         "--eval-every", "1000",  # 每1000步评估一次
+        "--use-gumbel-sinkhorn",  # 启用Gumbel-Sinkhorn软置换
+        "--gumbel-temp-min", "0.1",  # Gumbel-Sinkhorn最小温度
+        "--gumbel-temp-max", "1.0",  # Gumbel-Sinkhorn最大温度
+        "--anneal-every", "2000",  # 每2000步进行一次温度退火
+        "--enable-flow-training",  # 启用Flow模型训练
+        "--flow-weight", "0.1",  # Flow模型损失权重
+        "--flow-prior", "gaussian",  # Flow模型先验分布
     ]
     
     # 替换命令行参数

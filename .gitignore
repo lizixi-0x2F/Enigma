@@ -19,6 +19,13 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.pytest_cache/
+coverage.xml
+*.cover
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
 
 # Distribution / packaging
 .env
@@ -28,6 +35,9 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+.python-version
+pip-log.txt
+pip-delete-this-directory.txt
 
 # PyTorch/机器学习
 *.pt
@@ -40,17 +50,34 @@ venv.bak/
 *.pb
 *.profile-empty
 *.tensorflow
+*.onnx
+*.tflite
+*.engine
+*.safetensors
+*_model/
 
 # 数据集和模型
 bert-chinese-base/
 checkpoints_optimized/
 checkpoints_full/
+checkpoints_*/
 wiki-full-zh/
 __MACOSX/
 *.npy
 *.npz
 *.pickle
 *.pkl
+*.parquet
+*.arrow
+*.jsonl
+*.csv
+*.tsv
+*.zip
+*.gz
+*.bz2
+*.xz
+*.tar
+datasets/
 
 # 日志和输出
 *.log
@@ -60,6 +87,12 @@ runs/
 lightning_logs/
 wandb/
 tensorboard/
+tb_logs/
+mlruns/
+nohup.out
+training.log
+eval_results/
+events.out.tfevents.*
 
 # 编辑器/IDE
 .idea/
@@ -68,6 +101,15 @@ tensorboard/
 *.swo
 *~
 .DS_Store
+Thumbs.db
+.ipynb_checkpoints/
+*.sublime-workspace
+*.sublime-project
 
 # 特定输出文件
 train_full.log
+generated_samples/
+profiler_output/
+tmp/
+temp/
+.cache/

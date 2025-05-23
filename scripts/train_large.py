@@ -172,6 +172,8 @@ def parse_args():
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='训练设备')
     parser.add_argument('--use-amp', action='store_true', default=True, help='是否使用混合精度训练')
+    parser.add_argument('--amp-dtype', type=str, default='float16', choices=['float16', 'bfloat16'], 
+                        help='混合精度训练的数据类型')
     parser.add_argument('--use-alibi', action='store_true', default=True, help='是否使用ALiBi位置编码')
     parser.add_argument('--max-samples', type=int, default=None, help='最大加载样本数，None表示全部加载')
     parser.add_argument('--save-every', type=int, default=2000, help='每多少步保存一次检查点')
@@ -183,6 +185,18 @@ def parse_args():
                         help='是否使用已保存的分词器')
     parser.add_argument('--saved-tokenizer-path', type=str, default='checkpoints_optimized/tokenizer.pkl', 
                         help='已保存的分词器路径')
+    # 添加Gumbel-Sinkhorn相关参数
+    parser.add_argument('--use-gumbel-sinkhorn', action='store_true', default=False, 
+                        help='是否使用Gumbel-Sinkhorn软置换')
+    parser.add_argument('--gumbel-temp-min', type=float, default=0.1, help='Gumbel-Sinkhorn最小温度')
+    parser.add_argument('--gumbel-temp-max', type=float, default=1.0, help='Gumbel-Sinkhorn最大温度')
+    parser.add_argument('--anneal-every', type=int, default=2000, help='每多少步执行一次温度退火')
+    # 添加Flow模型训练相关参数
+    parser.add_argument('--enable-flow-training', action='store_true', default=False, 
+                        help='是否启用Flow模型训练')
+    parser.add_argument('--flow-weight', type=float, default=0.1, help='Flow模型损失权重')
+    parser.add_argument('--flow-prior', type=str, default='gaussian', choices=['gaussian', 'uniform'], 
+                        help='Flow模型先验分布')
     return parser.parse_args()
 
 def evaluate(model, dataset, device, pad_token_id, num_samples=100):
@@ -244,8 +258,17 @@ def train():
         num_transformer_layers=args.num_transformer_layers,
         num_heads=args.num_heads,
         max_len=args.max_len,
-        use_alibi=args.use_alibi
+        use_alibi=args.use_alibi,
+        use_gumbel_sinkhorn=args.use_gumbel_sinkhorn,
+        gumbel_temp_min=args.gumbel_temp_min,
+        gumbel_temp_max=args.gumbel_temp_max
     ).to(args.device)
+    
+    # 创建Flow模型（如果启用）
+    flow_model = None
+    if args.enable_flow_training:
+        print("启用Flow模型训练")
+        flow_model = model.create_flow_model(prior=args.flow_prior)
     
     # 定义优化器和损失函数
     optimizer = optim.AdamW(
@@ -275,7 +298,7 @@ def train():
     criterion = nn.CrossEntropyLoss(ignore_index=dataset.pad_token_id)
     
     # 混合精度训练
-    scaler = torch.amp.GradScaler('cuda') if args.use_amp else None
+    scaler = torch.amp.GradScaler() if args.use_amp else None
     
     # 恢复训练检查点（如果指定）
     start_epoch = 0
@@ -313,11 +336,28 @@ def train():
                 
                 # 混合精度训练
                 if args.use_amp:
-                    with torch.amp.autocast('cuda'):
+                    with torch.amp.autocast('cuda', dtype=torch.float16 if args.amp_dtype == 'float16' else torch.bfloat16):
                         # 前向传播
                         logits = model(inputs)
-                        # 计算损失
-                        loss = criterion(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+                        # 计算语言模型损失
+                        lm_loss = criterion(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+                        
+                        # 如果启用Flow模型训练，添加Flow损失
+                        flow_loss = 0.0
+                        if args.enable_flow_training and flow_model is not None:
+                            # 随机获取一批样本进行Flow训练
+                            batch_size = tokens.size(0)
+                            with torch.no_grad():
+                                # 从先验分布采样
+                                z = torch.randn(batch_size, args.d_model, device=args.device)
+                            
+                            # 计算Flow模型损失（负对数似然）
+                            x = flow_model.inverse(z)  # 生成样本
+                            flow_log_probs = flow_model.log_prob(x)  # 计算对数概率
+                            flow_loss = -flow_log_probs.mean() * args.flow_weight
+                        
+                        # 组合损失
+                        loss = lm_loss + flow_loss
                         # 梯度累积：缩放损失
                         loss = loss / args.grad_accum_steps
                     
@@ -339,8 +379,25 @@ def train():
                     # 常规训练
                     # 前向传播
                     logits = model(inputs)
-                    # 计算损失
-                    loss = criterion(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+                    # 计算语言模型损失
+                    lm_loss = criterion(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+                    
+                    # 如果启用Flow模型训练，添加Flow损失
+                    flow_loss = 0.0
+                    if args.enable_flow_training and flow_model is not None:
+                        # 随机获取一批样本进行Flow训练
+                        batch_size = tokens.size(0)
+                        with torch.no_grad():
+                            # 从先验分布采样
+                            z = torch.randn(batch_size, args.d_model, device=args.device)
+                        
+                        # 计算Flow模型损失（负对数似然）
+                        x = flow_model.inverse(z)  # 生成样本
+                        flow_log_probs = flow_model.log_prob(x)  # 计算对数概率
+                        flow_loss = -flow_log_probs.mean() * args.flow_weight
+                    
+                    # 组合损失
+                    loss = lm_loss + flow_loss
                     # 梯度累积：缩放损失
                     loss = loss / args.grad_accum_steps
                     
@@ -368,6 +425,11 @@ def train():
                     "avg_loss": f"{epoch_loss/(step+1):.4f}",
                     "lr": f"{current_lr:.8f}"
                 })
+                
+                # 如果使用Gumbel-Sinkhorn，定期执行温度退火
+                if args.use_gumbel_sinkhorn and global_step % args.anneal_every == 0:
+                    temps = model.anneal_gumbel_temperatures()
+                    print(f"\nStep {global_step}, 执行Gumbel-Sinkhorn温度退火: {temps}")
                 
                 # 定期评估
                 if global_step % args.eval_every == 0:
