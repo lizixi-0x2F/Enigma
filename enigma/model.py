@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from enigma.plugboard import Plugboard
-from enigma.rotor import RotorStack
+from enigma.rotor import create_rotor_stack
 from enigma.reflector import Reflector
 from enigma.rev_block import RevBlock
 
@@ -23,7 +23,7 @@ class Enigma(nn.Module):
     """
     
     def __init__(self, d, num_rev_blocks=3, num_rotors=3, plugboard_sparsity=0.1, 
-                 use_checkpointing=False, invertibility_weight=0.01):
+                 use_checkpointing=False, invertibility_weight=0.05):
         super(Enigma, self).__init__()
         
         assert d % 2 == 0, "维度d必须是偶数"
@@ -37,7 +37,7 @@ class Enigma(nn.Module):
         self.plugboard = Plugboard(d, plugboard_sparsity)
         
         # RotorStack - 动态置换层
-        self.rotor_stack = RotorStack(d, num_rotors)
+        self.rotor_stack = create_rotor_stack(d, num_rotors)
         
         # RevBlocks - 可逆卷积层
         self.rev_blocks = nn.ModuleList([
@@ -87,7 +87,7 @@ class Enigma(nn.Module):
         # 保存当前转子状态，用于逆操作
         self._save_rotor_positions()
         
-        y = self.rotor_stack(y)
+        y = self.rotor_stack.permute(y)
         # 前向传播后步进转子
         self.rotor_stack.step_all()
         
@@ -127,10 +127,17 @@ class Enigma(nn.Module):
             positions.append(rotor.position.clone())
         
         # 将所有位置保存到一个tensor中
-        self.saved_positions = torch.stack(positions)
+        if positions:  # 确保positions非空
+            self.saved_positions = torch.stack(positions)
+        else:
+            # 如果没有转子，创建一个空的张量
+            self.saved_positions = torch.zeros(0, dtype=torch.long, device=next(self.parameters()).device)
     
     def _restore_rotor_positions(self):
         """从单一tensor中恢复保存的转子位置"""
+        if len(self.saved_positions) == 0 or len(self.rotor_stack.rotors) == 0:
+            return  # 如果没有转子或没有保存的位置，直接返回
+            
         for i, rotor in enumerate(self.rotor_stack.rotors):
             rotor.position.copy_(self.saved_positions[i])
     
@@ -160,7 +167,7 @@ class Enigma(nn.Module):
         
         # 5. 恢复转子状态到前向传播前，然后进行逆操作
         self._restore_rotor_positions()
-        x = self.rotor_stack.inverse(x)
+        x = self.rotor_stack.inverse_permute(x)
         
         # 6. 通过Plugboard的逆变换
         x = self.plugboard.inverse(x)
@@ -230,4 +237,77 @@ class Enigma(nn.Module):
                 # 保持掩码
                 self.plugboard.weight.copy_(orthogonal_weight)
             except:
-                pass 
+                pass
+
+class EnigmaLM(nn.Module):
+    """
+    基于Enigma架构的自回归语言模型
+    
+    参数:
+        vocab_size (int): 词表大小
+        d (int): 嵌入和隐藏层维度
+        num_rev_blocks (int): Enigma核心的RevBlock层数
+        num_rotors (int): Enigma核心的转子数量
+        num_transformer_layers (int): Transformer层数
+        num_heads (int): 多头注意力的头数
+        d_ff (int): 前馈网络的隐藏层维度
+        max_len (int): 最大序列长度
+        use_alibi (bool): 是否使用ALiBi位置编码
+    """
+    def __init__(self, vocab_size, d, num_rev_blocks, num_rotors, num_transformer_layers=6, 
+                 num_heads=8, d_ff=None, max_len=8192, use_alibi=True):
+        super().__init__()
+        from enigma.token_embedding import TokenEmbedding
+        from enigma.attention import RevTransformerLayer
+        
+        if d_ff is None:
+            d_ff = 4 * d
+            
+        self.embed = TokenEmbedding(vocab_size, d, max_len)
+        self.enigma_core = Enigma(d, num_rev_blocks, num_rotors)
+        
+        # Transformer层，传递ALiBi参数和最大序列长度
+        self.transformer_layers = nn.ModuleList([
+            RevTransformerLayer(d, num_heads, d_ff, use_alibi=use_alibi, max_seq_len=max_len) 
+            for _ in range(num_transformer_layers)
+        ])
+        
+        # 输出投影层
+        self.lm_head = nn.Linear(d, vocab_size, bias=False)
+        # 共享嵌入和输出权重
+        self.lm_head.weight = self.embed.token_emb.weight
+        
+        # 记录最大序列长度
+        self.max_len = max_len
+
+    def forward(self, tokens):
+        """
+        前向传播
+        
+        参数:
+            tokens (Tensor): 形状为 [B, T] 的输入token序列
+            
+        返回:
+            Tensor: 形状为 [B, T, V] 的logits
+        """
+        # 嵌入层
+        h = self.embed(tokens)             # token + pos embedding
+        
+        # 生成因果掩码 (防止信息泄露)
+        seq_len = tokens.size(1)
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool()
+        causal_mask = causal_mask.to(tokens.device)
+        
+        # Enigma核心处理
+        B, T, D = h.shape
+        h_flat = h.reshape(B*T, D)
+        h_flat = self.enigma_core(h_flat)  # 处理所有位置
+        h = h_flat.reshape(B, T, D)
+        
+        # Transformer层处理
+        for layer in self.transformer_layers:
+            h = layer(h, ~causal_mask)
+        
+        # 输出投影
+        logits = self.lm_head(h)           # (B, T, V)
+        return logits 

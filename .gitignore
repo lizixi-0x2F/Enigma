@@ -2,3 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+bert-chinese-base
+checkpoints_optimized
+wiki-full-zh
+__MACOSX/wiki-full-zh

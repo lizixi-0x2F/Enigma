@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import numpy as np
+from typing import List
+from enigma.rotor_base import RotorBase
 
 
 def shift(permutation, step):
@@ -20,7 +22,7 @@ def shift(permutation, step):
     return permutation[indices]
 
 
-class Rotor(nn.Module):
+class Rotor(RotorBase, nn.Module):
     """
     实现Enigma机转子机制的动态置换层
     
@@ -30,7 +32,8 @@ class Rotor(nn.Module):
     """
     
     def __init__(self, d, notch_pos=None):
-        super(Rotor, self).__init__()
+        RotorBase.__init__(self)
+        nn.Module.__init__(self)
         self.d = d
         self.notch_pos = notch_pos if notch_pos is not None else d // 2
         
@@ -68,7 +71,7 @@ class Rotor(nn.Module):
         self.register_buffer('cached_forward_perms', torch.stack(forward_perms))
         self.register_buffer('cached_inverse_perms', torch.stack(inverse_perms))
     
-    def forward(self, x):
+    def permute(self, x):
         """
         应用当前置换状态
         
@@ -84,7 +87,7 @@ class Rotor(nn.Module):
         # 应用置换
         return x[:, current_perm]
     
-    def inverse(self, y):
+    def inverse_permute(self, y):
         """
         应用置换的逆操作
         
@@ -99,6 +102,13 @@ class Rotor(nn.Module):
         
         # 应用逆置换
         return y[:, current_inv_perm]
+    
+    # 保留原有的forward和inverse方法，但调用新的接口方法
+    def forward(self, x):
+        return self.permute(x)
+    
+    def inverse(self, y):
+        return self.inverse_permute(y)
     
     def step(self):
         """
@@ -116,65 +126,83 @@ class Rotor(nn.Module):
         # 检查是否越过缺口
         return self.position.item() == self.notch_pos
 
+    def at_notch(self):
+        """
+        检查转子是否处于缺口位置
+        
+        返回:
+            bool: 如果转子处于缺口位置则为True，否则为False
+        """
+        return self.position.item() == self.notch_pos
 
-class RotorStack(nn.Module):
+
+class RotorStack:
     """
     多个转子的组合，模拟Enigma机的多转子机制
     
     参数:
-        d (int): 输入/输出维度
-        num_rotors (int): 转子数量
+        rotors (List[RotorBase]): 转子列表
     """
     
-    def __init__(self, d, num_rotors):
-        super(RotorStack, self).__init__()
-        self.d = d
-        self.num_rotors = num_rotors
+    def __init__(self, rotors: List[RotorBase]):
+        self.rotors = rotors
         
-        # 创建多个转子，确保每个转子使用不同的置换
-        self.rotors = nn.ModuleList()
-        for i in range(num_rotors):
-            # 使用不同的种子初始化每个转子
-            torch.manual_seed(42 + i)
-            self.rotors.append(Rotor(d, notch_pos=int(d * (i+1) / (num_rotors+1))))
-    
-    def forward(self, x):
+    def permute(self, x):
         """
         顺序应用所有转子
         
         参数:
-            x (Tensor): 形状为 [B, d] 的输入张量
+            x (Tensor): 输入张量
             
         返回:
-            Tensor: 形状为 [B, d] 的经过所有转子处理的输出张量
+            Tensor: 经过所有转子处理的输出张量
         """
         # 依次通过每个转子
-        for rotor in self.rotors:
-            x = rotor(x)
+        for r in self.rotors:
+            x = r.permute(x)
         return x
     
-    def inverse(self, y):
+    def inverse_permute(self, x):
         """
         逆序应用所有转子的逆操作
         
         参数:
-            y (Tensor): 形状为 [B, d] 的输入张量
+            x (Tensor): 输入张量
             
         返回:
-            Tensor: 形状为 [B, d] 的经过所有转子逆操作处理的输出张量
+            Tensor: 经过所有转子逆操作处理的输出张量
         """
         # 逆序依次通过每个转子的逆操作
-        for rotor in reversed(self.rotors):
-            y = rotor.inverse(y)
-        return y
+        for r in reversed(self.rotors):
+            x = r.inverse_permute(x)
+        return x
     
     def step_all(self):
         """更新所有转子位置，具有缺口进位机制"""
         # 模拟Enigma机的转子进位机制
-        carry = True  # 第一个转子总是转动
+        for i, r in enumerate(self.rotors):
+            r.step()
+            if not r.at_notch():
+                break
+
+
+# 保留原始RotorStack的创建方法，但作为工厂函数
+def create_rotor_stack(d, num_rotors):
+    """
+    创建标准的转子堆栈
+    
+    参数:
+        d (int): 输入/输出维度
+        num_rotors (int): 转子数量
         
-        for rotor in self.rotors:
-            if carry:
-                carry = rotor.step()  # 如果前一个转子触发缺口，则当前转子步进
-            else:
-                break  # 如果没有进位，则停止步进 
+    返回:
+        RotorStack: 转子堆栈对象
+    """
+    # 创建多个转子，确保每个转子使用不同的置换
+    rotors = []
+    for i in range(num_rotors):
+        # 使用不同的种子初始化每个转子
+        torch.manual_seed(42 + i)
+        rotors.append(Rotor(d, notch_pos=int(d * (i+1) / (num_rotors+1))))
+    
+    return RotorStack(rotors) 
