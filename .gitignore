@@ -2,7 +2,72 @@
 __pycache__/
 *.py[cod]
 *$py.class
-bert-chinese-base
-checkpoints_optimized
-wiki-full-zh
-__MACOSX/wiki-full-zh
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Distribution / packaging
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# PyTorch/机器学习
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.hdf5
+*.tfevents.*
+*.meta
+*.pb
+*.profile-empty
+*.tensorflow
+
+# 数据集和模型
+bert-chinese-base/
+checkpoints_optimized/
+checkpoints_full/
+wiki-full-zh/
+__MACOSX/
+*.npy
+*.npz
+*.pickle
+*.pkl
+
+# 日志和输出
+*.log
+outputs/
+logs/
+runs/
+lightning_logs/
+wandb/
+tensorboard/
+
+# 编辑器/IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 特定输出文件
+train_full.log
