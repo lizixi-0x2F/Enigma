@@ -4,6 +4,8 @@ from enigma.plugboard import Plugboard
 from enigma.rotor import create_rotor_stack
 from enigma.reflector import Reflector
 from enigma.rev_block import RevBlock
+from enigma.jacobian_logdet import EnigmaFlow, JacobianLogDet
+from enigma.gumbel_sinkhorn import GumbelSinkhornRotorStack
 
 
 class Enigma(nn.Module):
@@ -20,10 +22,14 @@ class Enigma(nn.Module):
         plugboard_sparsity (float): Plugboard稀疏度
         use_checkpointing (bool): 是否使用梯度检查点以节省内存
         invertibility_weight (float): 可逆性损失权重
+        use_gumbel_sinkhorn (bool): 是否使用Gumbel-Sinkhorn软置换
+        gumbel_temp_min (float): Gumbel-Sinkhorn最小温度
+        gumbel_temp_max (float): Gumbel-Sinkhorn最大温度
     """
     
     def __init__(self, d, num_rev_blocks=3, num_rotors=3, plugboard_sparsity=0.1, 
-                 use_checkpointing=False, invertibility_weight=0.05):
+                 use_checkpointing=False, invertibility_weight=0.05,
+                 use_gumbel_sinkhorn=False, gumbel_temp_min=0.1, gumbel_temp_max=1.0):
         super(Enigma, self).__init__()
         
         assert d % 2 == 0, "维度d必须是偶数"
@@ -32,12 +38,21 @@ class Enigma(nn.Module):
         self.num_rotors = num_rotors
         self.use_checkpointing = use_checkpointing
         self.invertibility_weight = invertibility_weight
+        self.use_gumbel_sinkhorn = use_gumbel_sinkhorn
         
         # Plugboard - 稀疏双射层
         self.plugboard = Plugboard(d, plugboard_sparsity)
         
         # RotorStack - 动态置换层
-        self.rotor_stack = create_rotor_stack(d, num_rotors)
+        if use_gumbel_sinkhorn:
+            self.rotor_stack = GumbelSinkhornRotorStack(
+                dim=d,
+                num_rotors=num_rotors,
+                temp_min=gumbel_temp_min,
+                temp_max=gumbel_temp_max
+            )
+        else:
+            self.rotor_stack = create_rotor_stack(d, num_rotors)
         
         # RevBlocks - 可逆卷积层
         self.rev_blocks = nn.ModuleList([
@@ -68,15 +83,17 @@ class Enigma(nn.Module):
                 rev_block.F.scale.fill_(0.005)
                 rev_block.G.scale.fill_(0.005)
     
-    def forward(self, x):
+    def forward(self, x, compute_logdet=False):
         """
         前向传播
         
         参数:
             x (Tensor): 形状为 [B, d] 的输入张量
+            compute_logdet (bool): 是否计算雅可比行列式对数(用于Flow模型)
             
         返回:
             Tensor: 形状为 [B, d] 的输出张量
+            (可选) Tensor: 雅可比行列式对数值
         """
         batch_size = x.size(0)
         
@@ -87,7 +104,7 @@ class Enigma(nn.Module):
         # 保存当前转子状态，用于逆操作
         self._save_rotor_positions()
         
-        y = self.rotor_stack.permute(y)
+        y = self.rotor_stack.permute(y) if not self.use_gumbel_sinkhorn else self.rotor_stack(y)
         # 前向传播后步进转子
         self.rotor_stack.step_all()
         
@@ -118,38 +135,52 @@ class Enigma(nn.Module):
                 error = torch.norm(x - x_reconstructed) / (torch.norm(x) + 1e-8)
                 self.last_invertibility_error = error
         
+        # 如果需要计算雅可比行列式对数(用于Flow模型)
+        if compute_logdet:
+            logdet = JacobianLogDet.compute_logdet_analytical(self, x)
+            return y, logdet
+        
         return y
     
     def _save_rotor_positions(self):
         """保存当前转子位置到单一tensor中"""
+        if self.use_gumbel_sinkhorn:
+            # Gumbel-Sinkhorn转子不需要保存位置
+            return
+            
         positions = []
         for i, rotor in enumerate(self.rotor_stack.rotors):
             positions.append(rotor.position.clone())
         
         # 将所有位置保存到一个tensor中
         if positions:  # 确保positions非空
-        self.saved_positions = torch.stack(positions)
+            self.saved_positions = torch.stack(positions)
         else:
             # 如果没有转子，创建一个空的张量
             self.saved_positions = torch.zeros(0, dtype=torch.long, device=next(self.parameters()).device)
     
     def _restore_rotor_positions(self):
         """从单一tensor中恢复保存的转子位置"""
-        if len(self.saved_positions) == 0 or len(self.rotor_stack.rotors) == 0:
+        if self.use_gumbel_sinkhorn or len(self.saved_positions) == 0:
+            return  # Gumbel-Sinkhorn转子不需要恢复位置
+            
+        if len(self.rotor_stack.rotors) == 0:
             return  # 如果没有转子或没有保存的位置，直接返回
             
         for i, rotor in enumerate(self.rotor_stack.rotors):
             rotor.position.copy_(self.saved_positions[i])
     
-    def inverse(self, y):
+    def inverse(self, y, compute_logdet=False):
         """
         逆向传播
         
         参数:
             y (Tensor): 形状为 [B, d] 的输入张量
+            compute_logdet (bool): 是否计算雅可比行列式对数(用于Flow模型)
             
         返回:
             Tensor: 形状为 [B, d] 的输出张量
+            (可选) Tensor: 雅可比行列式对数值
         """
         # 1. 通过Plugboard转置的逆变换
         x = self.plugboard.transpose_inverse(y)
@@ -167,11 +198,20 @@ class Enigma(nn.Module):
         
         # 5. 恢复转子状态到前向传播前，然后进行逆操作
         self._restore_rotor_positions()
-        x = self.rotor_stack.inverse_permute(x)
+        if self.use_gumbel_sinkhorn:
+            x = self.rotor_stack.inverse(x)
+        else:
+            x = self.rotor_stack.inverse_permute(x)
         
         # 6. 通过Plugboard的逆变换
         x = self.plugboard.inverse(x)
         
+        # 如果需要计算雅可比行列式对数(用于Flow模型)
+        if compute_logdet:
+            # 逆操作的雅可比行列式是正向操作的倒数，所以取负值
+            logdet = -JacobianLogDet.compute_logdet_analytical(self, x)
+            return x, logdet
+            
         return x
     
     def loss_regularizer(self):
@@ -197,117 +237,153 @@ class Enigma(nn.Module):
         return reg_loss
     
     def check_invertibility(self, x, atol=1e-5):
-        """
-        检查模型对给定输入的可逆性
+        """检查模型的可逆性
         
         参数:
-            x (Tensor): 测试输入张量
-            atol (float): 容忍误差
+            x (Tensor): 输入样本
+            atol (float): 绝对容差
             
         返回:
-            tuple: (是否可逆, 重构误差)
+            bool: 是否满足可逆性条件
+            float: 误差值
         """
         with torch.no_grad():
-            # 前向传播
-            y = self(x)
-            
-            # 逆向传播
+            y = self.forward(x)
             x_reconstructed = self.inverse(y)
-            
-            # 计算误差
             error = torch.norm(x - x_reconstructed) / (torch.norm(x) + 1e-8)
-            
-            # 判断是否满足可逆性要求
-            is_invertible = error < atol
-            
-            return is_invertible.item() if hasattr(is_invertible, 'item') else bool(is_invertible), error.item()
-            
+            is_invertible = error.item() < atol
+            return is_invertible, error.item()
+    
     def orthogonalize_weights(self):
-        """对模型权重进行正交化处理，提高可逆性"""
-        # 强制Reflector保持正交
-        self.reflector._reparameterize()
+        """周期性正交化权重以提高数值稳定性"""
+        # 对Reflector进行正交化
+        self.reflector.orthogonalize()
         
-        # 确保Plugboard尽可能接近正交
-        with torch.no_grad():
-            sparse_weight = self.plugboard.weight * self.plugboard.mask
-            # 使用SVD正交化
-            try:
-                U, S, V = torch.svd(sparse_weight)
-                orthogonal_weight = torch.matmul(U, V.t())
-                # 保持掩码
-                self.plugboard.weight.copy_(orthogonal_weight)
-            except:
-                pass 
+        # 对RevBlock的权重进行调整
+        for rev_block in self.rev_blocks:
+            with torch.no_grad():
+                # 将权重缩放到合理范围
+                max_scale = 0.1
+                scale_norm = torch.norm(rev_block.F.scale)
+                if scale_norm > max_scale:
+                    rev_block.F.scale.data *= max_scale / scale_norm
+                    
+                scale_norm = torch.norm(rev_block.G.scale)
+                if scale_norm > max_scale:
+                    rev_block.G.scale.data *= max_scale / scale_norm
+    
+    def anneal_gumbel_temperatures(self):
+        """退火降低Gumbel-Sinkhorn的温度"""
+        if self.use_gumbel_sinkhorn:
+            return self.rotor_stack.anneal_temperatures()
+        return 0.0
+            
+    def create_flow_model(self, prior='gaussian'):
+        """创建基于当前Enigma模型的Flow生成模型
+        
+        参数:
+            prior (str): 先验分布类型，'gaussian'或'uniform'
+            
+        返回:
+            EnigmaFlow: Flow生成模型实例
+        """
+        return EnigmaFlow(self, prior=prior)
+
 
 class EnigmaLM(nn.Module):
     """
-    基于Enigma架构的自回归语言模型
+    使用Enigma作为骨干网络的语言模型
     
     参数:
-        vocab_size (int): 词表大小
-        d (int): 嵌入和隐藏层维度
-        num_rev_blocks (int): Enigma核心的RevBlock层数
-        num_rotors (int): Enigma核心的转子数量
+        vocab_size (int): 词汇表大小
+        d (int): 模型维度
+        num_rev_blocks (int): RevBlock层数
+        num_rotors (int): 转子数量
         num_transformer_layers (int): Transformer层数
-        num_heads (int): 多头注意力的头数
-        d_ff (int): 前馈网络的隐藏层维度
+        num_heads (int): 注意力头数
+        d_ff (int): 前馈层维度，默认为4*d
         max_len (int): 最大序列长度
         use_alibi (bool): 是否使用ALiBi位置编码
+        use_gumbel_sinkhorn (bool): 是否使用Gumbel-Sinkhorn软置换
+        gumbel_temp_min (float): Gumbel-Sinkhorn最小温度
+        gumbel_temp_max (float): Gumbel-Sinkhorn最大温度
     """
+    
     def __init__(self, vocab_size, d, num_rev_blocks, num_rotors, num_transformer_layers=6, 
-                 num_heads=8, d_ff=None, max_len=8192, use_alibi=True):
-        super().__init__()
+                 num_heads=8, d_ff=None, max_len=8192, use_alibi=True,
+                 use_gumbel_sinkhorn=False, gumbel_temp_min=0.1, gumbel_temp_max=1.0):
+        super(EnigmaLM, self).__init__()
+        
+        self.d = d
+        
+        # Token嵌入
         from enigma.token_embedding import TokenEmbedding
-        from enigma.attention import RevTransformerLayer
+        self.token_embedding = TokenEmbedding(vocab_size, d)
         
-        if d_ff is None:
-            d_ff = 4 * d
-            
-        self.embed = TokenEmbedding(vocab_size, d, max_len)
-        self.enigma_core = Enigma(d, num_rev_blocks, num_rotors)
+        # Enigma骨干网络
+        self.enigma = Enigma(
+            d=d,
+            num_rev_blocks=num_rev_blocks,
+            num_rotors=num_rotors,
+            use_gumbel_sinkhorn=use_gumbel_sinkhorn,
+            gumbel_temp_min=gumbel_temp_min,
+            gumbel_temp_max=gumbel_temp_max
+        )
         
-        # Transformer层，传递ALiBi参数和最大序列长度
-        self.transformer_layers = nn.ModuleList([
-            RevTransformerLayer(d, num_heads, d_ff, use_alibi=use_alibi, max_seq_len=max_len) 
+        # Transformer层
+        from enigma.attention import TransformerBlock
+        d_ff = d_ff or 4 * d
+        self.transformer_blocks = nn.ModuleList([
+            TransformerBlock(d, num_heads, d_ff, use_alibi=use_alibi, max_len=max_len)
             for _ in range(num_transformer_layers)
         ])
         
-        # 输出投影层
-        self.lm_head = nn.Linear(d, vocab_size, bias=False)
-        # 共享嵌入和输出权重
-        self.lm_head.weight = self.embed.token_emb.weight
+        # 输出层
+        self.output_norm = nn.LayerNorm(d)
+        self.output_linear = nn.Linear(d, vocab_size, bias=False)
         
-        # 记录最大序列长度
-        self.max_len = max_len
-
+        # 权重绑定 (共享嵌入权重和输出层权重)
+        self.output_linear.weight = self.token_embedding.embedding.weight
+    
     def forward(self, tokens):
         """
         前向传播
         
         参数:
-            tokens (Tensor): 形状为 [B, T] 的输入token序列
+            tokens (LongTensor): 形状为 [B, L] 的输入token序列
             
         返回:
-            Tensor: 形状为 [B, T, V] 的logits
+            Tensor: 形状为 [B, L, vocab_size] 的对数概率
         """
-        # 嵌入层
-        h = self.embed(tokens)             # token + pos embedding
+        # 获取序列长度和批量大小
+        B, L = tokens.shape
         
-        # 生成因果掩码 (防止信息泄露)
-        seq_len = tokens.size(1)
-        causal_mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool()
-        causal_mask = causal_mask.to(tokens.device)
+        # Token嵌入
+        x = self.token_embedding(tokens)  # [B, L, d]
         
-        # Enigma核心处理
-        B, T, D = h.shape
-        h_flat = h.reshape(B*T, D)
-        h_flat = self.enigma_core(h_flat)  # 处理所有位置
-        h = h_flat.reshape(B, T, D)
+        # Enigma处理
+        enigma_outputs = []
+        for i in range(L):
+            # 对每个位置应用Enigma
+            enigma_out = self.enigma(x[:, i])  # [B, d]
+            enigma_outputs.append(enigma_out)
         
-        # Transformer层处理
-        for layer in self.transformer_layers:
-            h = layer(h, ~causal_mask)
+        x = torch.stack(enigma_outputs, dim=1)  # [B, L, d]
         
-        # 输出投影
-        logits = self.lm_head(h)           # (B, T, V)
-        return logits 
+        # Transformer层
+        for transformer in self.transformer_blocks:
+            x = transformer(x)
+        
+        # 输出层
+        x = self.output_norm(x)
+        logits = self.output_linear(x)  # [B, L, vocab_size]
+        
+        return logits
+    
+    def anneal_gumbel_temperatures(self):
+        """退火降低Gumbel-Sinkhorn的温度"""
+        return self.enigma.anneal_gumbel_temperatures()
+    
+    def create_flow_model(self, prior='gaussian'):
+        """创建基于Enigma部分的Flow生成模型"""
+        return self.enigma.create_flow_model(prior=prior) 

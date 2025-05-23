@@ -232,9 +232,6 @@ class EnigmaFlow(nn.Module):
         # 先验分布类型
         self.prior_type = prior
         self.d = enigma_model.d
-        
-        # 为Enigma添加log-det计算功能
-        add_flow_logdet_to_enigma(type(self.enigma))
     
     def forward(self, x):
         """
@@ -247,8 +244,11 @@ class EnigmaFlow(nn.Module):
             z: 变换后的样本
             log_prob: 对数概率密度
         """
-        # 使用Enigma变换样本并计算log-det
-        z, logdet = self.enigma(x, compute_logdet=True)
+        # 使用Enigma变换样本
+        z = self.enigma(x)
+        
+        # 计算雅可比行列式对数
+        logdet = JacobianLogDet.compute_logdet_analytical(self.enigma, x)
         
         # 计算先验分布下的对数概率
         if self.prior_type == 'gaussian':
@@ -259,7 +259,7 @@ class EnigmaFlow(nn.Module):
         # 计算样本的对数概率
         log_prob = log_prior + logdet
         
-        return z, log_prob
+        return z
     
     def inverse(self, z):
         """
@@ -273,7 +273,10 @@ class EnigmaFlow(nn.Module):
             log_prob: 对数概率密度
         """
         # 使用Enigma的逆变换
-        x, logdet = self.enigma.inverse(z, compute_logdet=True)
+        x = self.enigma.inverse(z)
+        
+        # 计算雅可比行列式对数（逆变换的对数行列式是负的）
+        logdet = -JacobianLogDet.compute_logdet_analytical(self.enigma, x)
         
         # 计算样本的对数概率
         if self.prior_type == 'gaussian':
@@ -283,7 +286,7 @@ class EnigmaFlow(nn.Module):
         
         log_prob = log_prior + logdet
         
-        return x, log_prob
+        return x
     
     def sample(self, num_samples):
         """
@@ -302,7 +305,7 @@ class EnigmaFlow(nn.Module):
             z = torch.rand(num_samples, self.d, device=next(self.parameters()).device) * 2 - 1
         
         # 通过模型的逆变换生成样本
-        samples, _ = self.inverse(z)
+        samples = self.inverse(z)
         
         return samples
     
@@ -316,5 +319,18 @@ class EnigmaFlow(nn.Module):
         返回:
             log_prob: 对数概率密度
         """
-        _, log_prob = self.forward(x)
+        z = self.forward(x)
+        
+        # 计算雅可比行列式对数
+        logdet = JacobianLogDet.compute_logdet_analytical(self.enigma, x)
+        
+        # 计算先验分布下的对数概率
+        if self.prior_type == 'gaussian':
+            log_prior = -0.5 * torch.sum(z ** 2, dim=1) - 0.5 * self.d * torch.log(torch.tensor(2 * np.pi))
+        else:  # uniform先验
+            log_prior = torch.zeros(z.size(0), device=z.device)
+        
+        # 计算样本的对数概率
+        log_prob = log_prior + logdet
+        
         return log_prob 
