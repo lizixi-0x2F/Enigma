@@ -128,7 +128,7 @@ class Enigma(nn.Module):
         
         # 将所有位置保存到一个tensor中
         if positions:  # 确保positions非空
-            self.saved_positions = torch.stack(positions)
+        self.saved_positions = torch.stack(positions)
         else:
             # 如果没有转子，创建一个空的张量
             self.saved_positions = torch.zeros(0, dtype=torch.long, device=next(self.parameters()).device)
@@ -237,7 +237,7 @@ class Enigma(nn.Module):
                 # 保持掩码
                 self.plugboard.weight.copy_(orthogonal_weight)
             except:
-                pass
+                pass 
 
 class EnigmaLM(nn.Module):
     """

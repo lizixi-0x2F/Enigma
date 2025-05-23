@@ -48,7 +48,8 @@ class BertChineseTokenizer:
 class TextDataset(Dataset):
     """使用BERT中文分词器的文本数据集"""
     
-    def __init__(self, data_dir, seq_len=256, max_samples=None, tokenizer_name='bert-base-chinese'):
+    def __init__(self, data_dir, seq_len=256, max_samples=None, tokenizer_name='bert-base-chinese', 
+                 use_saved_tokenizer=True, saved_tokenizer_path='checkpoints_optimized/tokenizer.pkl'):
         self.seq_len = seq_len
         self.samples = []
         
@@ -78,8 +79,25 @@ class TextDataset(Dataset):
         print(f"加载了 {len(text_samples)} 段文本")
         
         # 初始化分词器
-        print("初始化BERT中文分词器...")
-        self.tokenizer = BertChineseTokenizer(tokenizer_name)
+        print("初始化分词器...")
+        
+        # 首先尝试加载保存的分词器
+        tokenizer_loaded = False
+        if use_saved_tokenizer and os.path.exists(saved_tokenizer_path):
+            try:
+                with open(saved_tokenizer_path, 'rb') as f:
+                    self.tokenizer = pickle.load(f)
+                print(f"成功从 {saved_tokenizer_path} 加载分词器")
+                tokenizer_loaded = True
+            except Exception as e:
+                print(f"加载保存的分词器时出错: {e}")
+                print("将创建新的分词器")
+        
+        # 如果没有成功加载保存的分词器，则创建新的分词器
+        if not tokenizer_loaded:
+            print("初始化BERT中文分词器...")
+            self.tokenizer = BertChineseTokenizer(tokenizer_name)
+        
         self.vocab_size = self.tokenizer.vocab_size
         self.pad_token_id = self.tokenizer.pad_token_id
         
@@ -161,6 +179,10 @@ def parse_args():
     parser.add_argument('--eval-samples', type=int, default=100, help='评估样本数')
     parser.add_argument('--resume', type=str, default=None, help='恢复训练的检查点路径')
     parser.add_argument('--tokenizer', type=str, default='bert-base-chinese', help='BERT分词器名称')
+    parser.add_argument('--use-saved-tokenizer', action='store_true', default=True, 
+                        help='是否使用已保存的分词器')
+    parser.add_argument('--saved-tokenizer-path', type=str, default='checkpoints_optimized/tokenizer.pkl', 
+                        help='已保存的分词器路径')
     return parser.parse_args()
 
 def evaluate(model, dataset, device, pad_token_id, num_samples=100):
@@ -189,7 +211,14 @@ def train():
     
     # 加载数据集
     print(f"加载数据集: {args.data}")
-    dataset = TextDataset(args.data, seq_len=args.seq_len, max_samples=args.max_samples, tokenizer_name=args.tokenizer)
+    dataset = TextDataset(
+        args.data, 
+        seq_len=args.seq_len, 
+        max_samples=args.max_samples, 
+        tokenizer_name=args.tokenizer,
+        use_saved_tokenizer=args.use_saved_tokenizer,
+        saved_tokenizer_path=args.saved_tokenizer_path
+    )
     
     # 分割训练集和验证集 (95% 训练，5% 验证)
     train_size = int(0.95 * len(dataset))
