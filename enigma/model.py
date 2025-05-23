@@ -6,7 +6,7 @@ from enigma.rotor import create_rotor_stack
 from enigma.reflector import Reflector
 from enigma.rev_block import RevBlock
 from enigma.jacobian_logdet import JacobianLogDet, EnigmaFlow
-from enigma.gumbel_sinkhorn import GumbelSinkhornRotorStack
+from enigma.invertible_conv1x1 import InvertibleConv1x1Stack, DynamicInvertibleConv1x1Stack
 
 
 class Enigma(nn.Module):
@@ -23,14 +23,13 @@ class Enigma(nn.Module):
         plugboard_sparsity (float): Plugboard稀疏度
         use_checkpointing (bool): 是否使用梯度检查点以节省内存
         invertibility_weight (float): 可逆性损失权重
-        use_gumbel_sinkhorn (bool): 是否使用Gumbel-Sinkhorn软置换
-        gumbel_temp_min (float): Gumbel-Sinkhorn最小温度
-        gumbel_temp_max (float): Gumbel-Sinkhorn最大温度
+        use_dynamic_conv1x1 (bool): 是否使用动态可逆1×1卷积
+        conv1x1_positions (int): 动态1×1卷积的位置数量
     """
     
     def __init__(self, d, num_rev_blocks=3, num_rotors=3, plugboard_sparsity=0.1, 
                  use_checkpointing=False, invertibility_weight=0.05,
-                 use_gumbel_sinkhorn=False, gumbel_temp_min=0.1, gumbel_temp_max=1.0):
+                 use_dynamic_conv1x1=True, conv1x1_positions=None):
         super(Enigma, self).__init__()
         
         assert d % 2 == 0, "维度d必须是偶数"
@@ -39,20 +38,28 @@ class Enigma(nn.Module):
         self.num_rotors = num_rotors
         self.use_checkpointing = use_checkpointing
         self.invertibility_weight = invertibility_weight
-        self.use_gumbel_sinkhorn = use_gumbel_sinkhorn
+        self.use_dynamic_conv1x1 = use_dynamic_conv1x1
         
         # Plugboard - 稀疏双射层
         self.plugboard = Plugboard(d, plugboard_sparsity)
         
-        # RotorStack - 动态置换层
-        if use_gumbel_sinkhorn:
-            self.rotor_stack = GumbelSinkhornRotorStack(
-                dim=d,
-                num_rotors=num_rotors,
-                temp_min=gumbel_temp_min,
-                temp_max=gumbel_temp_max
-            )
+        # RotorStack - 动态置换层，现在使用可逆1×1卷积
+        if use_dynamic_conv1x1:
+            if conv1x1_positions is not None:
+                # 使用动态可逆1×1卷积（类似原转子机制）
+                self.rotor_stack = DynamicInvertibleConv1x1Stack(
+                    dim=d,
+                    num_layers=num_rotors,
+                    num_positions=conv1x1_positions
+                )
+            else:
+                # 使用静态可逆1×1卷积堆栈
+                self.rotor_stack = InvertibleConv1x1Stack(
+                    dim=d,
+                    num_layers=num_rotors
+                )
         else:
+            # 使用传统转子
             self.rotor_stack = create_rotor_stack(d, num_rotors)
         
         # RevBlocks - 可逆卷积层
@@ -105,7 +112,7 @@ class Enigma(nn.Module):
         # 保存当前转子状态，用于逆操作
         self._save_rotor_positions()
         
-        y = self.rotor_stack.permute(y) if not self.use_gumbel_sinkhorn else self.rotor_stack(y)
+        y = self.rotor_stack.permute(y) if not self.use_dynamic_conv1x1 else self.rotor_stack(y)
         # 前向传播后步进转子
         self.rotor_stack.step_all()
         
@@ -145,8 +152,8 @@ class Enigma(nn.Module):
     
     def _save_rotor_positions(self):
         """保存当前转子位置到单一tensor中"""
-        if self.use_gumbel_sinkhorn:
-            # Gumbel-Sinkhorn转子不需要保存位置
+        if self.use_dynamic_conv1x1:
+            # DynamicConv1x1转子不需要保存位置
             return
             
         positions = []
@@ -162,8 +169,8 @@ class Enigma(nn.Module):
     
     def _restore_rotor_positions(self):
         """从单一tensor中恢复保存的转子位置"""
-        if self.use_gumbel_sinkhorn or len(self.saved_positions) == 0:
-            return  # Gumbel-Sinkhorn转子不需要恢复位置
+        if self.use_dynamic_conv1x1 or len(self.saved_positions) == 0:
+            return  # DynamicConv1x1转子不需要恢复位置
             
         if len(self.rotor_stack.rotors) == 0:
             return  # 如果没有转子或没有保存的位置，直接返回
@@ -199,7 +206,7 @@ class Enigma(nn.Module):
         
         # 5. 恢复转子状态到前向传播前，然后进行逆操作
         self._restore_rotor_positions()
-        if self.use_gumbel_sinkhorn:
+        if self.use_dynamic_conv1x1:
             x = self.rotor_stack.inverse(x)
         else:
             x = self.rotor_stack.inverse_permute(x)
@@ -273,12 +280,6 @@ class Enigma(nn.Module):
                 if scale_norm > max_scale:
                     rev_block.G.scale.data *= max_scale / scale_norm
     
-    def anneal_gumbel_temperatures(self):
-        """退火降低Gumbel-Sinkhorn的温度"""
-        if self.use_gumbel_sinkhorn:
-            return self.rotor_stack.anneal_temperatures()
-        return 0.0
-            
     def create_flow_model(self, prior='gaussian'):
         """创建基于当前Enigma模型的Flow生成模型
         
@@ -305,14 +306,13 @@ class EnigmaLM(nn.Module):
         d_ff (int): 前馈层维度，默认为4*d
         max_len (int): 最大序列长度
         use_alibi (bool): 是否使用ALiBi位置编码
-        use_gumbel_sinkhorn (bool): 是否使用Gumbel-Sinkhorn软置换
-        gumbel_temp_min (float): Gumbel-Sinkhorn最小温度
-        gumbel_temp_max (float): Gumbel-Sinkhorn最大温度
+        use_dynamic_conv1x1 (bool): 是否使用动态可逆1×1卷积
+        conv1x1_positions (int): 动态1×1卷积的位置数量
     """
     
     def __init__(self, vocab_size, d, num_rev_blocks, num_rotors, num_transformer_layers=6, 
                  num_heads=8, d_ff=None, max_len=8192, use_alibi=True,
-                 use_gumbel_sinkhorn=False, gumbel_temp_min=0.1, gumbel_temp_max=1.0):
+                 use_dynamic_conv1x1=True, conv1x1_positions=None):
         super(EnigmaLM, self).__init__()
         
         self.d = d
@@ -326,9 +326,8 @@ class EnigmaLM(nn.Module):
             d=d,
             num_rev_blocks=num_rev_blocks,
             num_rotors=num_rotors,
-            use_gumbel_sinkhorn=use_gumbel_sinkhorn,
-            gumbel_temp_min=gumbel_temp_min,
-            gumbel_temp_max=gumbel_temp_max
+            use_dynamic_conv1x1=use_dynamic_conv1x1,
+            conv1x1_positions=conv1x1_positions
         )
         
         # Transformer层
@@ -380,10 +379,6 @@ class EnigmaLM(nn.Module):
         logits = self.output_linear(x)  # [B, L, vocab_size]
         
         return logits
-    
-    def anneal_gumbel_temperatures(self):
-        """退火降低Gumbel-Sinkhorn的温度"""
-        return self.enigma.anneal_gumbel_temperatures()
     
     def create_flow_model(self, prior='gaussian'):
         """创建基于Enigma部分的Flow生成模型"""

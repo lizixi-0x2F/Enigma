@@ -9,6 +9,7 @@ from enigma.plugboard import Plugboard
 from enigma.reflector import Reflector
 from enigma.rev_block import RevBlock
 from enigma.rotor import Rotor, RotorStack
+from enigma.invertible_conv1x1 import InvertibleConv1x1, InvertibleConv1x1Stack, DynamicInvertibleConv1x1Stack
 
 __version__ = "0.1.0"
 
@@ -19,4 +20,7 @@ __all__ = [
     'RevBlock',
     'Rotor',
     'RotorStack',
+    'InvertibleConv1x1',
+    'InvertibleConv1x1Stack',
+    'DynamicInvertibleConv1x1Stack',
 ] 
