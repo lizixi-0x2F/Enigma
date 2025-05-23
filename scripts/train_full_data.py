@@ -28,7 +28,7 @@ def main():
         "--max-len", "8192",  # 最大序列长度
         "--tokenizer", "bert-chinese-base",  # 使用bert tokenizer
         "--use-saved-tokenizer",  # 使用保存的分词器
-        "--saved-tokenizer-path", "checkpoints_optimized/tokenizer.pkl",  # 分词器路径
+        "--saved-tokenizer-path", "tokenizer/tokenizer.pkl",  # 分词器路径
         "--save-every", "5000",  # 每5000步保存一次
         "--eval-every", "1000",  # 每1000步评估一次
         "--use-gumbel-sinkhorn",  # 启用Gumbel-Sinkhorn软置换

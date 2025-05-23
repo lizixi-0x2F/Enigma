@@ -1,10 +1,11 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from enigma.plugboard import Plugboard
 from enigma.rotor import create_rotor_stack
 from enigma.reflector import Reflector
 from enigma.rev_block import RevBlock
-from enigma.jacobian_logdet import EnigmaFlow, JacobianLogDet
+from enigma.jacobian_logdet import JacobianLogDet, EnigmaFlow
 from enigma.gumbel_sinkhorn import GumbelSinkhornRotorStack
 
 
@@ -343,7 +344,7 @@ class EnigmaLM(nn.Module):
         self.output_linear = nn.Linear(d, vocab_size, bias=False)
         
         # 权重绑定 (共享嵌入权重和输出层权重)
-        self.output_linear.weight = self.token_embedding.embedding.weight
+        self.output_linear.weight = self.token_embedding.token_emb.weight
     
     def forward(self, tokens):
         """

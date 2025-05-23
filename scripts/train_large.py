@@ -49,12 +49,64 @@ class TextDataset(Dataset):
     """使用BERT中文分词器的文本数据集"""
     
     def __init__(self, data_dir, seq_len=256, max_samples=None, tokenizer_name='bert-base-chinese', 
-                 use_saved_tokenizer=True, saved_tokenizer_path='checkpoints_optimized/tokenizer.pkl'):
+                 use_saved_tokenizer=True, saved_tokenizer_path='checkpoints_optimized/tokenizer.pkl',
+                 skip_tokenization=False):
         self.seq_len = seq_len
         self.samples = []
         
         print(f"正在加载数据集: {data_dir}")
         
+        # 首先尝试加载分词器
+        print("初始化分词器...")
+        
+        # 尝试加载保存的分词器
+        tokenizer_loaded = False
+        if use_saved_tokenizer and os.path.exists(saved_tokenizer_path):
+            try:
+                with open(saved_tokenizer_path, 'rb') as f:
+                    self.tokenizer = pickle.load(f)
+                print(f"成功从 {saved_tokenizer_path} 加载分词器")
+                tokenizer_loaded = True
+            except Exception as e:
+                print(f"加载保存的分词器时出错: {e}")
+                print("将创建新的分词器")
+                if skip_tokenization:
+                    raise ValueError("指定了跳过分词但无法加载分词器")
+        
+        # 如果没有成功加载保存的分词器，则创建新的分词器
+        if not tokenizer_loaded:
+            print("初始化BERT中文分词器...")
+            self.tokenizer = BertChineseTokenizer(tokenizer_name)
+        
+        self.vocab_size = self.tokenizer.vocab_size
+        self.pad_token_id = self.tokenizer.pad_token_id
+        
+        # 尝试从保存的样本文件加载
+        # 确保processed目录存在
+        processed_dir = os.path.join(data_dir, "processed")
+        os.makedirs(processed_dir, exist_ok=True)
+        processed_samples_path = os.path.join(processed_dir, f"processed_samples_seq{seq_len}.pt")
+        
+        if os.path.exists(processed_samples_path):
+            print(f"从处理好的文件加载样本: {processed_samples_path}")
+            try:
+                # 直接从预处理文件加载样本
+                self.samples = torch.load(processed_samples_path)
+                if max_samples and len(self.samples) > max_samples:
+                    print(f"限制样本数量为 {max_samples}")
+                    self.samples = self.samples[:max_samples]
+                print(f"成功加载 {len(self.samples)} 个预处理样本")
+                return  # 提前返回，跳过后续处理
+            except Exception as e:
+                print(f"加载预处理样本时出错: {e}")
+                if skip_tokenization:
+                    raise ValueError(f"指定了跳过分词但无法加载预处理样本: {e}")
+                print("将重新处理原始文本...")
+                self.samples = []  # 重置样本列表
+        elif skip_tokenization:
+            raise ValueError(f"指定了跳过分词但找不到预处理样本文件: {processed_samples_path}")
+        
+        # 如果没有预处理的样本文件或加载失败，则处理原始文本
         # 加载数据
         files = sorted(glob.glob(f"{data_dir}/*.parquet"))
         
@@ -78,29 +130,6 @@ class TextDataset(Dataset):
         
         print(f"加载了 {len(text_samples)} 段文本")
         
-        # 初始化分词器
-        print("初始化分词器...")
-        
-        # 首先尝试加载保存的分词器
-        tokenizer_loaded = False
-        if use_saved_tokenizer and os.path.exists(saved_tokenizer_path):
-            try:
-                with open(saved_tokenizer_path, 'rb') as f:
-                    self.tokenizer = pickle.load(f)
-                print(f"成功从 {saved_tokenizer_path} 加载分词器")
-                tokenizer_loaded = True
-            except Exception as e:
-                print(f"加载保存的分词器时出错: {e}")
-                print("将创建新的分词器")
-        
-        # 如果没有成功加载保存的分词器，则创建新的分词器
-        if not tokenizer_loaded:
-            print("初始化BERT中文分词器...")
-            self.tokenizer = BertChineseTokenizer(tokenizer_name)
-        
-        self.vocab_size = self.tokenizer.vocab_size
-        self.pad_token_id = self.tokenizer.pad_token_id
-        
         # 分词和截断为固定长度的序列
         print("对文本进行分词...")
         for text in tqdm(text_samples):
@@ -118,6 +147,13 @@ class TextDataset(Dataset):
                 self.samples.append(torch.tensor(chunk, dtype=torch.long))
         
         print(f"创建了 {len(self.samples)} 个训练样本")
+        
+        # 保存处理好的样本以便下次使用
+        try:
+            torch.save(self.samples, processed_samples_path)
+            print(f"处理好的样本已保存到 {processed_samples_path}")
+        except Exception as e:
+            print(f"保存处理好的样本时出错: {e}")
     
     def __len__(self):
         return len(self.samples)
@@ -185,6 +221,8 @@ def parse_args():
                         help='是否使用已保存的分词器')
     parser.add_argument('--saved-tokenizer-path', type=str, default='checkpoints_optimized/tokenizer.pkl', 
                         help='已保存的分词器路径')
+    parser.add_argument('--skip-tokenization', action='store_true', default=False,
+                        help='跳过分词处理，直接使用已处理的样本文件')
     # 添加Gumbel-Sinkhorn相关参数
     parser.add_argument('--use-gumbel-sinkhorn', action='store_true', default=False, 
                         help='是否使用Gumbel-Sinkhorn软置换')
@@ -231,7 +269,8 @@ def train():
         max_samples=args.max_samples, 
         tokenizer_name=args.tokenizer,
         use_saved_tokenizer=args.use_saved_tokenizer,
-        saved_tokenizer_path=args.saved_tokenizer_path
+        saved_tokenizer_path=args.saved_tokenizer_path,
+        skip_tokenization=args.skip_tokenization
     )
     
     # 分割训练集和验证集 (95% 训练，5% 验证)
