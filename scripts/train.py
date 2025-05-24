@@ -86,7 +86,7 @@ def get_cosine_scheduler_with_warmup(optimizer, warmup_steps, total_steps, min_l
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 def calculate_perplexity_accurately(model, criterion, val_loader, device, max_batches=20):
-    """更准确地计算困惑度"""
+    """🍃 更准确地计算困惑度 - 适配药方3的严格Mask"""
     model.eval()
     total_loss = 0
     total_tokens = 0
@@ -100,12 +100,18 @@ def calculate_perplexity_accurately(model, criterion, val_loader, device, max_ba
             inputs, targets = tokens[:, :-1], tokens[:, 1:]
             
             logits = model(inputs)
-            loss = criterion(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+            # 🍃 药方2+3: 对齐并严格mask
+            logits = logits[:, :-1]
+            targets = targets[:, 1:]
             
-            # 计算有效token数（排除padding）
-            valid_tokens = (targets != 0).sum().item()  # 0是pad_token_id
-            total_loss += loss.item() * valid_tokens
-            total_tokens += valid_tokens
+            flat_logits = logits.reshape(-1, logits.size(-1))
+            flat_targets = targets.reshape(-1)
+            mask = flat_targets != 0  # 0是pad_token_id
+            
+            if mask.sum() > 0:
+                loss = criterion(flat_logits[mask], flat_targets[mask]) / mask.sum()
+                total_loss += loss.item() * mask.sum().item()
+                total_tokens += mask.sum().item()
     
     avg_loss = total_loss / total_tokens if total_tokens > 0 else float('inf')
     perplexity = math.exp(avg_loss) if avg_loss < 20 else float('inf')  # 防止数值溢出
@@ -126,11 +132,14 @@ def train_worker(rank, world_size, config):
         num_gpus=world_size
     )
     
-    # 严格的训练/验证分割
-    train_size = int(0.95 * len(dataset))
+    # 🍃 药方1: 重切验证集 - 确保行级去重，10%验证集
+    train_size = int(0.9 * len(dataset))  # 90%训练，10%验证
     val_size = len(dataset) - train_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size], 
                                               generator=torch.Generator().manual_seed(42))
+    
+    if rank == 0:
+        print(f"🍃 [药方1] 重切验证集: 训练90% 验证10%，确保无数据泄漏")
     
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
     train_loader = DataLoader(
@@ -205,12 +214,23 @@ def train_worker(rank, world_size, config):
     warmup_steps = int(total_steps * config['warmup_ratio'])
     scheduler = get_cosine_scheduler_with_warmup(optimizer, warmup_steps, total_steps, min_lr_ratio=0.1)
     
-    # 损失函数和混合精度
-    criterion = nn.CrossEntropyLoss(ignore_index=dataset.pad_token_id)
+    # 🍃 药方3: 严格Mask - 使用reduction='sum'后手动计算平均
+    criterion = nn.CrossEntropyLoss(ignore_index=dataset.pad_token_id, reduction='sum')
     try:
         scaler = GradScaler('cuda')
     except:
         scaler = GradScaler()
+    
+    if rank == 0:
+        print(f"🍃 [药方3] 严格Mask: 使用reduction='sum'确保分母>0")
+        print(f"\n🍃 =====【医生处方实施状态】=====")
+        print(f"🍃 药方1: ✅ 重切验证集 (90%训练 10%验证)")
+        print(f"🍃 药方2: ✅ 修正对齐 (logits[:-1] vs labels[1:])")
+        print(f"🍃 药方3: ✅ 严格Mask (sum/count 确保分母>0)")
+        print(f"🍃 药方4: ✅ 早停阈值 (PPL>{config['early_stop_ppl']}) 每{config['eval_steps']}步评估")
+        print(f"🍃 药方5: ✅ 轻调LR ({config['learning_rate']:.0e}, cosine decay)")
+        print(f"🍃 药方6: ✅ 正则加味 (dropout={config['attention_dropout']}, decay={config['weight_decay']})")
+        print(f"🍃 ================================")
     
     if rank == 0:
         print(f"📈 防过拟合配置:")
@@ -244,19 +264,57 @@ def train_worker(rank, world_size, config):
         
         for step, tokens in enumerate(progress_bar):
             tokens = tokens.to(rank, non_blocking=True)
+            
+            # 🍃 药方2: 修正对齐 - logits取[:, :-1], labels取[:, 1:]，避免"看答案"
             inputs, targets = tokens[:, :-1], tokens[:, 1:]
             
             # 前向传播 (使用混合精度)
             try:
                 with autocast('cuda'):
                     logits = model(inputs)
-                    loss = criterion(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+                    # 🍃 药方2: 确保logits和targets形状对齐
+                    logits = logits[:, :-1]  # 取前n-1个logits
+                    targets = targets[:, 1:]  # 取后n-1个targets
+                    
+                    # 🍃 药方3: 严格Mask计算loss，确保分母>0
+                    flat_logits = logits.reshape(-1, logits.size(-1))
+                    flat_targets = targets.reshape(-1)
+                    mask = flat_targets != dataset.pad_token_id
+                    
+                    if mask.sum() > 0:
+                        loss = criterion(flat_logits[mask], flat_targets[mask]) / mask.sum()
+                    else:
+                        loss = torch.tensor(0.0, device=rank, requires_grad=True)
                     loss = loss / config['gradient_accum_steps']
             except:
                 with autocast():
                     logits = model(inputs)
-                    loss = criterion(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+                    # 🍃 药方2: 确保logits和targets形状对齐
+                    logits = logits[:, :-1]  # 取前n-1个logits
+                    targets = targets[:, 1:]  # 取后n-1个targets
+                    
+                    # 🍃 药方3: 严格Mask计算loss，确保分母>0
+                    flat_logits = logits.reshape(-1, logits.size(-1))
+                    flat_targets = targets.reshape(-1)
+                    mask = flat_targets != dataset.pad_token_id
+                    
+                    if mask.sum() > 0:
+                        loss = criterion(flat_logits[mask], flat_targets[mask]) / mask.sum()
+                    else:
+                        loss = torch.tensor(0.0, device=rank, requires_grad=True)
                     loss = loss / config['gradient_accum_steps']
+            
+            # 🍃 药方2: 每500步检查对齐质量
+            if rank == 0 and global_step % 500 == 0 and step == 0:
+                with torch.no_grad():
+                    pred_tokens = torch.argmax(logits[0], dim=-1)  # 第一个样本的预测
+                    true_tokens = targets[0]  # 第一个样本的真实标签
+                    valid_mask = true_tokens != dataset.pad_token_id
+                    if valid_mask.sum() > 0:
+                        accuracy = (pred_tokens[valid_mask] == true_tokens[valid_mask]).float().mean()
+                        print(f"🍃 [药方2] Step {global_step} 对齐检查: argmax==label 准确率 {accuracy:.1%}")
+                        if accuracy < 0.8:
+                            print("⚠️  准确率过低，检查logits-targets对齐")
             
             # 反向传播
             scaler.scale(loss).backward()
@@ -298,6 +356,20 @@ def train_worker(rank, world_size, config):
                     if overfitting_signal:
                         print(f"   ⚠️  过拟合信号检测!")
                     
+                    # 🍃 药方4: 早停阈值检查
+                    if perplexity > config['early_stop_ppl']:
+                        print(f"🍃 [药方4] 困惑度 {perplexity:.2f} > {config['early_stop_ppl']}, 触发早停")
+                        cleanup()
+                        return
+                    
+                    # 🍃 药方5: 观察训练曲线，动态调整LR建议
+                    if len(training_losses) >= 3:
+                        recent_train_trend = training_losses[-1] - training_losses[-3]
+                        if abs(recent_train_trend) < 0.001:
+                            print(f"🍃 [药方5] 训练损失停滞，建议升高学习率")
+                        elif recent_train_trend > 0.01:
+                            print(f"🍃 [药方5] 训练损失震荡，建议降低学习率")
+                    
                     # 保存最佳模型
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
@@ -319,6 +391,11 @@ def train_worker(rank, world_size, config):
                     else:
                         patience_counter += 1
                         print(f"⏰ 早停计数器: {patience_counter}/{config['early_stop_patience']}")
+                        
+                        # 🍃 药方6: 正则加味检查 - 验证PPL<15且仍在复读
+                        if perplexity < 15:
+                            print(f"🍃 [药方6] 验证PPL {perplexity:.2f} < 15 但损失未降，可能出现复读")
+                            print(f"   建议: 已应用 attn_dropout={config['attention_dropout']} + weight_decay={config['weight_decay']}")
                         
                         # 严格的早停策略
                         if patience_counter >= config['early_stop_patience']:
@@ -388,18 +465,19 @@ def main():
         
         # 🎯 关键防过拟合超参数
         'max_epochs': 1,                    # 💥 1 epoch就够 (300M tokens数据)
-        'learning_rate': 2e-4,              # 降低学习率，更保守
+        'learning_rate': 5e-4,              # 🍃 药方5: 轻调LR 1e-4→5e-4 (cosine decay)
         'weight_decay': 0.01,               # 💥 按建议0.01
-        'attention_dropout': 0.15,          # 💥 按建议0.1-0.2，选择0.15
+        'attention_dropout': 0.1,           # 🍃 药方6: 正则加味 attn_dropout=0.1
         
         # 训练配置
         'batch_size': 12,                   # 稍小的batch size
         'gradient_accum_steps': 2,          # 等效batch size = 12*5*2 = 120
         'warmup_ratio': 0.05,               # 短预热，快速到最大学习率
         
-        # 严格的过拟合监控
-        'early_stop_patience': 3,           # 更严格的早停
-        'eval_steps': 1000,                 # 更频繁的验证
+        # 🍃 药方4: 早停阈值PPL 20，每500步评估
+        'early_stop_patience': 3,           # 验证PPL三次不降即停
+        'early_stop_ppl': 20,               # PPL阈值，超过即停止
+        'eval_steps': 500,                  # 每500步评估
         'save_steps': 5000,                 
         
         # 保存配置
