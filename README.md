@@ -17,6 +17,15 @@ Enigma 是一个基于神经网络的可逆动态置换网络，其设计灵感�
 
 ## 🚀 快速开始
 
+### ⚠️ 数据准备要求
+
+**重要提示**: 本项目需要用户自备以下组件：
+
+1. **数据集**: 自行准备中文文本数据集，建议300M+ tokens
+2. **BERT编码器**: 自行下载中文BERT预训练模型
+   - 推荐：`bert-base-chinese` 或 `chinese-bert-wwm-ext`
+   - 放置路径：`bert-chinese-base/` 目录
+
 ### 训练模型
 
 ```bash
@@ -206,6 +215,38 @@ cd Enigma
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 pip install -r requirements.txt
 ```
+
+### 📁 数据准备 (DIY)
+
+**用户需要自行准备以下数据**：
+
+1. **中文文本数据集**:
+   ```bash
+   # 数据格式要求
+   wiki-full-zh/processed/
+   ├── train_seq256_bert_fast.pt    # 训练集 (必需)
+   ├── val_seq256_bert_fast.pt      # 验证集 (必需)
+   └── test_seq256_bert_fast.pt     # 测试集 (可选)
+   ```
+
+2. **BERT中文编码器**:
+   ```bash
+   # 下载BERT模型到指定目录
+   bert-chinese-base/
+   ├── config.json              # BERT配置文件
+   ├── pytorch_model.bin        # 预训练权重
+   ├── tokenizer_config.json    # 分词器配置
+   └── vocab.txt               # 词汇表文件
+   
+   # 推荐下载地址:
+   # https://huggingface.co/bert-base-chinese
+   # https://huggingface.co/hfl/chinese-bert-wwm-ext
+   ```
+
+3. **数据格式要求**:
+   - 每个`.pt`文件包含tokenized的序列数据
+   - 序列长度: 256 tokens
+   - vocab_size: 21128 (BERT中文词汇表)
 
 ### 🚀 启动优化训练
 
