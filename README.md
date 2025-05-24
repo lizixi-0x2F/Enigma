@@ -13,7 +13,7 @@ Enigma 是一个基于神经网络的可逆动态置换网络，其设计灵感�
 3. **Glow风格可逆1×1卷积**：替代原始Sinkhorn算法，提供更高的数值稳定性
 4. **多GPU并行训练**：支持5张4090 GPU分布式训练，数据分片各司其职
 5. **防过拟合训练**：基于300M tokens数据集的严格正则化配置
-6. **扩展功能**：支持可微分置换、基准测试和生成模型应用
+6. **扩展功能**：支持可微分置换和生成模型应用
 
 ## 🚀 快速开始
 
@@ -290,17 +290,7 @@ with torch.no_grad():
 
 ## 🧪 扩展功能
 
-### 1. 基准测试
-
-```python
-# Copy-Memory任务
-python scripts/benchmark.py --task copy --seq_len 50 --use_dynamic_conv1x1
-
-# enwik8压缩基准
-python scripts/benchmark.py --task enwik8 --seq_len 100 --use_dynamic_conv1x1
-```
-
-### 2. Flow生成模型
+### Flow生成模型
 
 ```python
 from enigma.jacobian_logdet import EnigmaFlow
@@ -373,7 +363,7 @@ generated = flow_model.sample(num_samples=10)
 - ✅ **核心架构**: 完成，可逆1×1卷积版本
 - ✅ **多GPU训练**: 完成，5×4090并行训练
 - ✅ **数值稳定性**: 优化完成，误差≤1e-6
-- ✅ **扩展功能**: Flow模型、基准测试
+- ✅ **扩展功能**: Flow模型
 - ✅ **🔥 配置优化**: 完成，模型精简+训练智能化
 - ✅ **🔥 BERT迁移**: 完成，统一词汇表
 - ✅ **🔥 代码现代化**: 完成，精简1400+行
