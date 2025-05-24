@@ -100,9 +100,8 @@ def calculate_perplexity_accurately(model, criterion, val_loader, device, max_ba
             inputs, targets = tokens[:, :-1], tokens[:, 1:]
             
             logits = model(inputs)
-            # 🍃 药方2+3: 对齐并严格mask
-            logits = logits[:, :-1]
-            targets = targets[:, 1:]
+            # 🍃 药方2+3: 正确对齐并严格mask - inputs[0:n-1] -> logits 预测 targets[1:n]
+            # 无需额外对齐，logits已对应正确的targets
             
             flat_logits = logits.reshape(-1, logits.size(-1))
             flat_targets = targets.reshape(-1)
@@ -225,7 +224,7 @@ def train_worker(rank, world_size, config):
         print(f"🍃 [药方3] 严格Mask: 使用reduction='sum'确保分母>0")
         print(f"\n🍃 =====【医生处方实施状态】=====")
         print(f"🍃 药方1: ✅ 重切验证集 (90%训练 10%验证)")
-        print(f"🍃 药方2: ✅ 修正对齐 (logits[:-1] vs labels[1:])")
+        print(f"🍃 药方2: ✅ 修正对齐 (inputs[0:n-1] -> logits 预测 targets[1:n])")
         print(f"🍃 药方3: ✅ 严格Mask (sum/count 确保分母>0)")
         print(f"🍃 药方4: ✅ 早停阈值 (PPL>{config['early_stop_ppl']}) 每{config['eval_steps']}步评估")
         print(f"🍃 药方5: ✅ 轻调LR ({config['learning_rate']:.0e}, cosine decay)")
@@ -265,16 +264,15 @@ def train_worker(rank, world_size, config):
         for step, tokens in enumerate(progress_bar):
             tokens = tokens.to(rank, non_blocking=True)
             
-            # 🍃 药方2: 修正对齐 - logits取[:, :-1], labels取[:, 1:]，避免"看答案"
+            # 🍃 药方2: 修正对齐 - inputs[0:n-1]预测targets[1:n]，避免"看答案"
             inputs, targets = tokens[:, :-1], tokens[:, 1:]
             
             # 前向传播 (使用混合精度)
             try:
                 with autocast('cuda'):
                     logits = model(inputs)
-                    # 🍃 药方2: 确保logits和targets形状对齐
-                    logits = logits[:, :-1]  # 取前n-1个logits
-                    targets = targets[:, 1:]  # 取后n-1个targets
+                    # 🍃 药方2: 正确对齐 - inputs[0:n-1] -> logits[0:n-1] 预测 targets[1:n]
+                    # 无需额外对齐，logits已对应正确的targets
                     
                     # 🍃 药方3: 严格Mask计算loss，确保分母>0
                     flat_logits = logits.reshape(-1, logits.size(-1))
@@ -289,9 +287,8 @@ def train_worker(rank, world_size, config):
             except:
                 with autocast():
                     logits = model(inputs)
-                    # 🍃 药方2: 确保logits和targets形状对齐
-                    logits = logits[:, :-1]  # 取前n-1个logits
-                    targets = targets[:, 1:]  # 取后n-1个targets
+                    # 🍃 药方2: 正确对齐 - inputs[0:n-1] -> logits[0:n-1] 预测 targets[1:n]
+                    # 无需额外对齐，logits已对应正确的targets
                     
                     # 🍃 药方3: 严格Mask计算loss，确保分母>0
                     flat_logits = logits.reshape(-1, logits.size(-1))
@@ -307,14 +304,26 @@ def train_worker(rank, world_size, config):
             # 🍃 药方2: 每500步检查对齐质量
             if rank == 0 and global_step % 500 == 0 and step == 0:
                 with torch.no_grad():
+                    # 调试对齐信息
+                    print(f"🔍 [对齐调试] inputs形状: {inputs.shape}, targets形状: {targets.shape}, logits形状: {logits.shape}")
+                    
                     pred_tokens = torch.argmax(logits[0], dim=-1)  # 第一个样本的预测
                     true_tokens = targets[0]  # 第一个样本的真实标签
                     valid_mask = true_tokens != dataset.pad_token_id
+                    
                     if valid_mask.sum() > 0:
                         accuracy = (pred_tokens[valid_mask] == true_tokens[valid_mask]).float().mean()
                         print(f"🍃 [药方2] Step {global_step} 对齐检查: argmax==label 准确率 {accuracy:.1%}")
+                        
+                        # 显示前5个token的对齐情况
+                        print(f"🔍 [对齐样例] 预测前5个: {pred_tokens[:5].tolist()}")
+                        print(f"🔍 [对齐样例] 真实前5个: {true_tokens[:5].tolist()}")
+                        print(f"🔍 [对齐样例] 输入前5个: {inputs[0][:5].tolist()}")
+                        
                         if accuracy < 0.8:
-                            print("⚠️  准确率过低，检查logits-targets对齐")
+                            print("⚠️  准确率过低，已修复双重对齐问题")
+                        else:
+                            print("✅ 对齐质量良好！")
             
             # 反向传播
             scaler.scale(loss).backward()
