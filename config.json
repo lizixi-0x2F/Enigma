@@ -1,0 +1,16 @@
+{
+  "architectures": ["EnigmaForCausalLM"],
+  "model_type": "enigma",
+  "vocab_size": 21128,
+  "hidden_size": 512,
+  "num_revblocks": 6,
+  "num_rotors": 4,
+  "num_transformer_layers": 8,
+  "num_attention_heads": 8,
+  "intermediate_size": 2048,
+  "max_position_embeddings": 2048,
+  "use_alibi": true,
+  "use_invertible_conv": true,
+  "layer_norm_eps": 1e-5,
+  "initializer_range": 0.02
+}
