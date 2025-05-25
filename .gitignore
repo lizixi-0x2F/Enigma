@@ -61,7 +61,7 @@ bert-chinese-base/
 checkpoints_optimized/
 checkpoints_full/
 checkpoints_*/
-wiki-full-zh/
+data/
 __MACOSX/
 *.npy
 *.npz
@@ -77,7 +77,31 @@ __MACOSX/
 *.bz2
 *.xz
 *.tar
+*.zst
 datasets/
+sft_data/
+eval_data/
+
+# LoRA和微调相关
+lora_weights/
+sft_checkpoints/
+lora_adapters/
+adapter_config.json
+adapter_model.bin
+*_lora_*.pt
+*_sft_*.pt
+*_unfrozen_*.pt
+
+# API密钥和配置
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+config/secrets.json
+*.key
+*.secret
+api_keys.txt
 
 # 日志和输出
 *.log
@@ -93,6 +117,21 @@ nohup.out
 training.log
 eval_results/
 events.out.tfevents.*
+monitor_*.log
+sft_*.log
+lora_*.log
+
+# 分布式训练
+dist_training/
+torch_dist/
+multinode_logs/
+
+# 评估和推理结果
+inference_results/
+eval_outputs/
+generated_texts/
+benchmark_results/
+quality_scores/
 
 # 编辑器/IDE
 .idea/
@@ -113,3 +152,24 @@ profiler_output/
 tmp/
 temp/
 .cache/
+
+# 数据处理
+processed_data/
+tokenized_data/
+dedup_data/
+filtered_data/
+
+# 大型数据文件（但保留小样本用于测试）
+am_0.9M.jsonl
+!sample_data.jsonl
+!test_*.jsonl
+
+# 实验和调试
+experiments/
+debug_outputs/
+test_runs/
+scratch/
+
+# Large processed data
+am_0.9M_processed.pkl
+am_0.9M_processed_hf/
